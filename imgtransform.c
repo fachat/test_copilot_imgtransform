@@ -214,7 +214,7 @@ Image* resize_image(Image *src, int new_width, int new_height) {
     return dst;
 }
 
-// Simple median-cut color quantization
+// Color quantization to 16-color VGA palette
 void quantize_colors(Image *img, Color *palette, int num_colors) {
     // Use a standard 16-color palette (similar to VGA palette)
     Color vga_palette[16] = {
@@ -245,7 +245,7 @@ void quantize_colors(Image *img, Color *palette, int num_colors) {
         uint8_t g = img->data[idx + 1];
         uint8_t b = img->data[idx + 2];
         
-        int min_dist = INT32_MAX;
+        int min_dist = INT_MAX;
         int best_color = 0;
         
         for (int c = 0; c < num_colors; c++) {

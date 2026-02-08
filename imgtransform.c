@@ -226,11 +226,11 @@ Image* crop_to_aspect_ratio(Image *src, int target_width, int target_height) {
     
     if (src_aspect > target_aspect) {
         // Source is too wide, crop left and right
-        new_width = (int)(src->height * target_aspect);
+        new_width = (int)(src->height * target_aspect + 0.5);
         crop_x = (src->width - new_width) / 2;
     } else if (src_aspect < target_aspect) {
         // Source is too tall, crop top and bottom
-        new_height = (int)(src->width / target_aspect);
+        new_height = (int)(src->width / target_aspect + 0.5);
         crop_y = (src->height - new_height) / 2;
     } else {
         // Aspect ratios match, no cropping needed

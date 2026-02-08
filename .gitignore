@@ -1,0 +1,7 @@
+# Build artifacts
+*.o
+imgtransform
+
+# Test files
+test_input.png
+output.bmp

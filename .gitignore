@@ -1,0 +1,10 @@
+# Build artifacts
+*.o
+imgtransform
+
+# Test files
+test_input.png
+output.bmp
+
+# CodeQL
+_codeql_detected_source_root

@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <limits.h>
+#include <unistd.h>
+#include <getopt.h>
 #include <png.h>
 
 #define TARGET_WIDTH 720
@@ -53,30 +55,21 @@ typedef struct {
     uint8_t *data; // RGB data
 } Image;
 
-// Read PNG file
-Image* read_png(const char *filename) {
-    FILE *fp = fopen(filename, "rb");
-    if (!fp) {
-        fprintf(stderr, "Error: Cannot open file %s\n", filename);
-        return NULL;
-    }
-
+// Read PNG from file pointer
+Image* read_png_from_fp(FILE *fp) {
     png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
     if (!png) {
-        fclose(fp);
         return NULL;
     }
 
     png_infop info = png_create_info_struct(png);
     if (!info) {
         png_destroy_read_struct(&png, NULL, NULL);
-        fclose(fp);
         return NULL;
     }
 
     if (setjmp(png_jmpbuf(png))) {
         png_destroy_read_struct(&png, &info, NULL);
-        fclose(fp);
         return NULL;
     }
 
@@ -110,7 +103,6 @@ Image* read_png(const char *filename) {
     png_bytep *row_pointers = (png_bytep*)malloc(sizeof(png_bytep) * height);
     if (!row_pointers) {
         png_destroy_read_struct(&png, &info, NULL);
-        fclose(fp);
         return NULL;
     }
     
@@ -123,7 +115,6 @@ Image* read_png(const char *filename) {
             }
             free(row_pointers);
             png_destroy_read_struct(&png, &info, NULL);
-            fclose(fp);
             return NULL;
         }
     }
@@ -138,7 +129,6 @@ Image* read_png(const char *filename) {
         }
         free(row_pointers);
         png_destroy_read_struct(&png, &info, NULL);
-        fclose(fp);
         return NULL;
     }
     
@@ -152,7 +142,6 @@ Image* read_png(const char *filename) {
         }
         free(row_pointers);
         png_destroy_read_struct(&png, &info, NULL);
-        fclose(fp);
         return NULL;
     }
 
@@ -174,8 +163,19 @@ Image* read_png(const char *filename) {
     }
     free(row_pointers);
     png_destroy_read_struct(&png, &info, NULL);
-    fclose(fp);
 
+    return img;
+}
+
+// Read PNG file
+Image* read_png(const char *filename) {
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        fprintf(stderr, "Error: Cannot open file %s\n", filename);
+        return NULL;
+    }
+    Image *img = read_png_from_fp(fp);
+    fclose(fp);
     return img;
 }
 
@@ -211,6 +211,56 @@ Image* resize_image(Image *src, int new_width, int new_height) {
         }
     }
 
+    return dst;
+}
+
+// Crop image to match target aspect ratio (crop on long side only)
+Image* crop_to_aspect_ratio(Image *src, int target_width, int target_height) {
+    float src_aspect = (float)src->width / src->height;
+    float target_aspect = (float)target_width / target_height;
+    
+    int new_width = src->width;
+    int new_height = src->height;
+    int crop_x = 0;
+    int crop_y = 0;
+    
+    if (src_aspect > target_aspect) {
+        // Source is too wide, crop left and right
+        new_width = (int)(src->height * target_aspect);
+        crop_x = (src->width - new_width) / 2;
+    } else if (src_aspect < target_aspect) {
+        // Source is too tall, crop top and bottom
+        new_height = (int)(src->width / target_aspect);
+        crop_y = (src->height - new_height) / 2;
+    } else {
+        // Aspect ratios match, no cropping needed
+        return NULL;
+    }
+    
+    Image *dst = (Image*)malloc(sizeof(Image));
+    if (!dst) {
+        return NULL;
+    }
+    
+    dst->width = new_width;
+    dst->height = new_height;
+    dst->data = (uint8_t*)malloc(new_width * new_height * 3);
+    if (!dst->data) {
+        free(dst);
+        return NULL;
+    }
+    
+    for (int y = 0; y < new_height; y++) {
+        for (int x = 0; x < new_width; x++) {
+            int src_idx = ((y + crop_y) * src->width + (x + crop_x)) * 3;
+            int dst_idx = (y * new_width + x) * 3;
+            
+            dst->data[dst_idx + 0] = src->data[src_idx + 0];
+            dst->data[dst_idx + 1] = src->data[src_idx + 1];
+            dst->data[dst_idx + 2] = src->data[src_idx + 2];
+        }
+    }
+    
     return dst;
 }
 
@@ -266,8 +316,8 @@ void quantize_colors(Image *img, Color *palette, int num_colors) {
     }
 }
 
-// Write BMP to stdout
-void write_bmp(Image *img, Color *palette, int num_colors) {
+// Write BMP to file pointer
+void write_bmp(Image *img, Color *palette, int num_colors, FILE *out) {
     // BMP rows must be padded to 4-byte boundary
     int row_size = ((img->width * 4 + 31) / 32) * 4; // 4 bits per pixel
     int pixel_data_size = row_size * img->height;
@@ -295,8 +345,8 @@ void write_bmp(Image *img, Color *palette, int num_colors) {
     info_header.biClrImportant = num_colors;
     
     // Write headers
-    fwrite(&file_header, sizeof(BMPFileHeader), 1, stdout);
-    fwrite(&info_header, sizeof(BMPInfoHeader), 1, stdout);
+    fwrite(&file_header, sizeof(BMPFileHeader), 1, out);
+    fwrite(&info_header, sizeof(BMPInfoHeader), 1, out);
     
     // Write palette
     for (int i = 0; i < num_colors; i++) {
@@ -305,7 +355,7 @@ void write_bmp(Image *img, Color *palette, int num_colors) {
         quad.rgbGreen = palette[i].g;
         quad.rgbRed = palette[i].r;
         quad.rgbReserved = 0;
-        fwrite(&quad, sizeof(RGBQuad), 1, stdout);
+        fwrite(&quad, sizeof(RGBQuad), 1, out);
     }
     
     // Create index map for quick color lookup
@@ -348,7 +398,7 @@ void write_bmp(Image *img, Color *palette, int num_colors) {
                 row_buffer[byte_idx] |= color_idx;
             }
         }
-        fwrite(row_buffer, row_size, 1, stdout);
+        fwrite(row_buffer, row_size, 1, out);
     }
     
     free(row_buffer);
@@ -364,24 +414,75 @@ void free_image(Image *img) {
     }
 }
 
+void print_usage(const char *program_name) {
+    fprintf(stderr, "Usage: %s [OPTIONS] [input.png]\n\n", program_name);
+    fprintf(stderr, "Image transformation utility that converts PNG images to BMP format.\n");
+    fprintf(stderr, "Reads a PNG image, resizes it to 720x576 resolution, reduces the color\n");
+    fprintf(stderr, "palette to 16 colors (VGA palette), and outputs the result as a BMP file.\n\n");
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -h           Show this help message and exit\n");
+    fprintf(stderr, "  -o <file>    Save output to <file> instead of stdout\n");
+    fprintf(stderr, "  -c           Crop the source image to match target aspect ratio.\n");
+    fprintf(stderr, "               If the source is too wide, crop left and right sides equally.\n");
+    fprintf(stderr, "               If the source is too tall, crop top and bottom equally.\n\n");
+    fprintf(stderr, "If no input file is specified, PNG data is read from stdin.\n");
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <png_file>\n", argv[0]);
-        return 1;
+    const char *input_file = NULL;
+    const char *output_file = NULL;
+    int crop_mode = 0;
+    int opt;
+    
+    while ((opt = getopt(argc, argv, "hco:")) != -1) {
+        switch (opt) {
+            case 'h':
+                print_usage(argv[0]);
+                return 0;
+            case 'o':
+                output_file = optarg;
+                break;
+            case 'c':
+                crop_mode = 1;
+                break;
+            default:
+                print_usage(argv[0]);
+                return 1;
+        }
     }
     
-    const char *input_file = argv[1];
+    // Get optional input filename from remaining arguments
+    if (optind < argc) {
+        input_file = argv[optind];
+    }
     
     // Read PNG
-    Image *img = read_png(input_file);
+    Image *img;
+    if (input_file) {
+        img = read_png(input_file);
+    } else {
+        img = read_png_from_fp(stdin);
+    }
+    
     if (!img) {
         fprintf(stderr, "Error: Failed to read PNG file\n");
         return 1;
     }
     
+    // Optionally crop to target aspect ratio
+    Image *source = img;
+    if (crop_mode) {
+        Image *cropped = crop_to_aspect_ratio(img, TARGET_WIDTH, TARGET_HEIGHT);
+        if (cropped) {
+            free_image(img);
+            source = cropped;
+        }
+        // If cropped is NULL, aspect ratios already match, use original
+    }
+    
     // Resize to 720x576
-    Image *resized = resize_image(img, TARGET_WIDTH, TARGET_HEIGHT);
-    free_image(img);
+    Image *resized = resize_image(source, TARGET_WIDTH, TARGET_HEIGHT);
+    free_image(source);
     
     if (!resized) {
         fprintf(stderr, "Error: Failed to resize image\n");
@@ -392,8 +493,23 @@ int main(int argc, char *argv[]) {
     Color palette[NUM_COLORS];
     quantize_colors(resized, palette, NUM_COLORS);
     
-    // Write BMP to stdout
-    write_bmp(resized, palette, NUM_COLORS);
+    // Determine output destination
+    FILE *out = stdout;
+    if (output_file) {
+        out = fopen(output_file, "wb");
+        if (!out) {
+            fprintf(stderr, "Error: Cannot open output file %s\n", output_file);
+            free_image(resized);
+            return 1;
+        }
+    }
+    
+    // Write BMP
+    write_bmp(resized, palette, NUM_COLORS, out);
+    
+    if (output_file) {
+        fclose(out);
+    }
     
     free_image(resized);
     

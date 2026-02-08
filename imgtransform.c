@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <limits.h>
 #include <png.h>
 
 #define TARGET_WIDTH 720
@@ -107,17 +108,53 @@ Image* read_png(const char *filename) {
     png_read_update_info(png, info);
 
     png_bytep *row_pointers = (png_bytep*)malloc(sizeof(png_bytep) * height);
+    if (!row_pointers) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        return NULL;
+    }
+    
     for (int y = 0; y < height; y++) {
         row_pointers[y] = (png_byte*)malloc(png_get_rowbytes(png, info));
+        if (!row_pointers[y]) {
+            // Free previously allocated rows
+            for (int i = 0; i < y; i++) {
+                free(row_pointers[i]);
+            }
+            free(row_pointers);
+            png_destroy_read_struct(&png, &info, NULL);
+            fclose(fp);
+            return NULL;
+        }
     }
 
     png_read_image(png, row_pointers);
 
     // Create image structure
     Image *img = (Image*)malloc(sizeof(Image));
+    if (!img) {
+        for (int y = 0; y < height; y++) {
+            free(row_pointers[y]);
+        }
+        free(row_pointers);
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        return NULL;
+    }
+    
     img->width = width;
     img->height = height;
     img->data = (uint8_t*)malloc(width * height * 3);
+    if (!img->data) {
+        free(img);
+        for (int y = 0; y < height; y++) {
+            free(row_pointers[y]);
+        }
+        free(row_pointers);
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        return NULL;
+    }
 
     // Copy to RGB format
     for (int y = 0; y < height; y++) {
@@ -145,9 +182,17 @@ Image* read_png(const char *filename) {
 // Resize image using simple nearest neighbor interpolation
 Image* resize_image(Image *src, int new_width, int new_height) {
     Image *dst = (Image*)malloc(sizeof(Image));
+    if (!dst) {
+        return NULL;
+    }
+    
     dst->width = new_width;
     dst->height = new_height;
     dst->data = (uint8_t*)malloc(new_width * new_height * 3);
+    if (!dst->data) {
+        free(dst);
+        return NULL;
+    }
 
     float x_ratio = (float)src->width / new_width;
     float y_ratio = (float)src->height / new_height;
@@ -265,6 +310,10 @@ void write_bmp(Image *img, Color *palette, int num_colors) {
     
     // Create index map for quick color lookup
     uint8_t *indices = (uint8_t*)malloc(img->width * img->height);
+    if (!indices) {
+        fprintf(stderr, "Error: Memory allocation failed for color indices\n");
+        return;
+    }
     for (int i = 0; i < img->width * img->height; i++) {
         int idx = i * 3;
         uint8_t r = img->data[idx + 0];
@@ -281,6 +330,11 @@ void write_bmp(Image *img, Color *palette, int num_colors) {
     
     // Write pixel data (bottom to top, 4 bits per pixel, padded)
     uint8_t *row_buffer = (uint8_t*)calloc(row_size, 1);
+    if (!row_buffer) {
+        fprintf(stderr, "Error: Memory allocation failed for row buffer\n");
+        free(indices);
+        return;
+    }
     for (int y = img->height - 1; y >= 0; y--) {
         memset(row_buffer, 0, row_size);
         for (int x = 0; x < img->width; x++) {
@@ -328,6 +382,11 @@ int main(int argc, char *argv[]) {
     // Resize to 720x576
     Image *resized = resize_image(img, TARGET_WIDTH, TARGET_HEIGHT);
     free_image(img);
+    
+    if (!resized) {
+        fprintf(stderr, "Error: Failed to resize image\n");
+        return 1;
+    }
     
     // Quantize to 16 colors
     Color palette[NUM_COLORS];

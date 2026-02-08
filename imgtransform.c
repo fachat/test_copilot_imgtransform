@@ -264,29 +264,187 @@ Image* crop_to_aspect_ratio(Image *src, int target_width, int target_height) {
     return dst;
 }
 
-// Color quantization to 16-color VGA palette
-void quantize_colors(Image *img, Color *palette, int num_colors) {
-    // Use a standard 16-color palette (similar to VGA palette)
-    Color vga_palette[16] = {
-        {0, 0, 0},       // Black
-        {0, 0, 170},     // Blue
-        {0, 170, 0},     // Green
-        {0, 170, 170},   // Cyan
-        {170, 0, 0},     // Red
-        {170, 0, 170},   // Magenta
-        {170, 85, 0},    // Brown
-        {170, 170, 170}, // Light Gray
-        {85, 85, 85},    // Dark Gray
-        {85, 85, 255},   // Light Blue
-        {85, 255, 85},   // Light Green
-        {85, 255, 255},  // Light Cyan
-        {255, 85, 85},   // Light Red
-        {255, 85, 255},  // Light Magenta
-        {255, 255, 85},  // Yellow
-        {255, 255, 255}  // White
-    };
+// Structure for median-cut color box
+typedef struct {
+    int r_min, r_max;
+    int g_min, g_max;
+    int b_min, b_max;
+    Color *colors;
+    int count;
+} ColorBox;
+
+// Find the range of each color channel in a box
+void find_box_range(ColorBox *box) {
+    box->r_min = box->g_min = box->b_min = 255;
+    box->r_max = box->g_max = box->b_max = 0;
     
-    memcpy(palette, vga_palette, sizeof(Color) * 16);
+    for (int i = 0; i < box->count; i++) {
+        if (box->colors[i].r < box->r_min) box->r_min = box->colors[i].r;
+        if (box->colors[i].r > box->r_max) box->r_max = box->colors[i].r;
+        if (box->colors[i].g < box->g_min) box->g_min = box->colors[i].g;
+        if (box->colors[i].g > box->g_max) box->g_max = box->colors[i].g;
+        if (box->colors[i].b < box->b_min) box->b_min = box->colors[i].b;
+        if (box->colors[i].b > box->b_max) box->b_max = box->colors[i].b;
+    }
+}
+
+// Comparison functions for qsort
+static int compare_r(const void *a, const void *b) {
+    return ((Color*)a)->r - ((Color*)b)->r;
+}
+
+static int compare_g(const void *a, const void *b) {
+    return ((Color*)a)->g - ((Color*)b)->g;
+}
+
+static int compare_b(const void *a, const void *b) {
+    return ((Color*)a)->b - ((Color*)b)->b;
+}
+
+// Calculate average color of a box
+Color box_average(ColorBox *box) {
+    long r_sum = 0, g_sum = 0, b_sum = 0;
+    for (int i = 0; i < box->count; i++) {
+        r_sum += box->colors[i].r;
+        g_sum += box->colors[i].g;
+        b_sum += box->colors[i].b;
+    }
+    Color avg;
+    avg.r = (uint8_t)(r_sum / box->count);
+    avg.g = (uint8_t)(g_sum / box->count);
+    avg.b = (uint8_t)(b_sum / box->count);
+    return avg;
+}
+
+// Generate optimized palette using median-cut algorithm
+void generate_optimized_palette(Image *img, Color *palette, int num_colors) {
+    int pixel_count = img->width * img->height;
+    
+    // Initialize palette to black as fallback in case of early return
+    for (int i = 0; i < num_colors; i++) {
+        palette[i].r = palette[i].g = palette[i].b = 0;
+    }
+    
+    // Create array of all colors in image
+    Color *all_colors = (Color*)malloc(sizeof(Color) * pixel_count);
+    if (!all_colors) {
+        fprintf(stderr, "Error: Memory allocation failed for color array\n");
+        return;
+    }
+    
+    for (int i = 0; i < pixel_count; i++) {
+        int idx = i * 3;
+        all_colors[i].r = img->data[idx + 0];
+        all_colors[i].g = img->data[idx + 1];
+        all_colors[i].b = img->data[idx + 2];
+    }
+    
+    // Create initial box containing all colors
+    ColorBox *boxes = (ColorBox*)malloc(sizeof(ColorBox) * num_colors);
+    if (!boxes) {
+        fprintf(stderr, "Error: Memory allocation failed for color boxes\n");
+        free(all_colors);
+        return;
+    }
+    
+    boxes[0].colors = all_colors;
+    boxes[0].count = pixel_count;
+    find_box_range(&boxes[0]);
+    int num_boxes = 1;
+    
+    // Split boxes until we have enough
+    while (num_boxes < num_colors) {
+        // Find box with largest range to split
+        int best_box = -1;
+        int best_range = 0;
+        
+        for (int i = 0; i < num_boxes; i++) {
+            if (boxes[i].count < 2) continue; // Can't split a box with fewer than 2 colors
+            
+            int r_range = boxes[i].r_max - boxes[i].r_min;
+            int g_range = boxes[i].g_max - boxes[i].g_min;
+            int b_range = boxes[i].b_max - boxes[i].b_min;
+            int max_range = r_range > g_range ? r_range : g_range;
+            max_range = max_range > b_range ? max_range : b_range;
+            
+            if (max_range > best_range) {
+                best_range = max_range;
+                best_box = i;
+            }
+        }
+        
+        if (best_box == -1) break; // No more boxes can be split
+        
+        // Determine which channel to split on
+        int r_range = boxes[best_box].r_max - boxes[best_box].r_min;
+        int g_range = boxes[best_box].g_max - boxes[best_box].g_min;
+        int b_range = boxes[best_box].b_max - boxes[best_box].b_min;
+        
+        if (r_range >= g_range && r_range >= b_range) {
+            qsort(boxes[best_box].colors, boxes[best_box].count, sizeof(Color), compare_r);
+        } else if (g_range >= r_range && g_range >= b_range) {
+            qsort(boxes[best_box].colors, boxes[best_box].count, sizeof(Color), compare_g);
+        } else {
+            qsort(boxes[best_box].colors, boxes[best_box].count, sizeof(Color), compare_b);
+        }
+        
+        // Split at median
+        int median = boxes[best_box].count / 2;
+        
+        // Create new box from second half
+        boxes[num_boxes].colors = boxes[best_box].colors + median;
+        boxes[num_boxes].count = boxes[best_box].count - median;
+        find_box_range(&boxes[num_boxes]);
+        
+        // Shrink original box to first half
+        boxes[best_box].count = median;
+        find_box_range(&boxes[best_box]);
+        
+        num_boxes++;
+    }
+    
+    // Calculate average color for each box
+    for (int i = 0; i < num_boxes; i++) {
+        palette[i] = box_average(&boxes[i]);
+    }
+    
+    // If we have fewer boxes than colors needed, fill remaining with black
+    for (int i = num_boxes; i < num_colors; i++) {
+        palette[i].r = palette[i].g = palette[i].b = 0;
+    }
+    
+    free(boxes);
+    free(all_colors);
+}
+
+// Color quantization to 16-color VGA palette or optimized palette
+void quantize_colors(Image *img, Color *palette, int num_colors, int optimize_palette) {
+    if (optimize_palette) {
+        // Generate optimized palette from image colors
+        generate_optimized_palette(img, palette, num_colors);
+    } else {
+        // Use a standard 16-color palette (similar to VGA palette)
+        Color vga_palette[16] = {
+            {0, 0, 0},       // Black
+            {0, 0, 170},     // Blue
+            {0, 170, 0},     // Green
+            {0, 170, 170},   // Cyan
+            {170, 0, 0},     // Red
+            {170, 0, 170},   // Magenta
+            {170, 85, 0},    // Brown
+            {170, 170, 170}, // Light Gray
+            {85, 85, 85},    // Dark Gray
+            {85, 85, 255},   // Light Blue
+            {85, 255, 85},   // Light Green
+            {85, 255, 255},  // Light Cyan
+            {255, 85, 85},   // Light Red
+            {255, 85, 255},  // Light Magenta
+            {255, 255, 85},  // Yellow
+            {255, 255, 255}  // White
+        };
+        
+        memcpy(palette, vga_palette, sizeof(Color) * 16);
+    }
     
     // Map each pixel to nearest color in palette
     for (int i = 0; i < img->width * img->height; i++) {
@@ -424,7 +582,9 @@ void print_usage(const char *program_name) {
     fprintf(stderr, "  -o <file>    Save output to <file> instead of stdout\n");
     fprintf(stderr, "  -c           Crop the source image to match target aspect ratio.\n");
     fprintf(stderr, "               If the source is too wide, crop left and right sides equally.\n");
-    fprintf(stderr, "               If the source is too tall, crop top and bottom equally.\n\n");
+    fprintf(stderr, "               If the source is too tall, crop top and bottom equally.\n");
+    fprintf(stderr, "  -C           Optimize the colour palette so that output colours best\n");
+    fprintf(stderr, "               match the input colours, instead of using the VGA palette.\n\n");
     fprintf(stderr, "If no input file is specified, PNG data is read from stdin.\n");
 }
 
@@ -432,9 +592,10 @@ int main(int argc, char *argv[]) {
     const char *input_file = NULL;
     const char *output_file = NULL;
     int crop_mode = 0;
+    int optimize_palette = 0;
     int opt;
     
-    while ((opt = getopt(argc, argv, "hco:")) != -1) {
+    while ((opt = getopt(argc, argv, "hcCo:")) != -1) {
         switch (opt) {
             case 'h':
                 print_usage(argv[0]);
@@ -444,6 +605,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'c':
                 crop_mode = 1;
+                break;
+            case 'C':
+                optimize_palette = 1;
                 break;
             default:
                 print_usage(argv[0]);
@@ -491,7 +655,7 @@ int main(int argc, char *argv[]) {
     
     // Quantize to 16 colors
     Color palette[NUM_COLORS];
-    quantize_colors(resized, palette, NUM_COLORS);
+    quantize_colors(resized, palette, NUM_COLORS, optimize_palette);
     
     // Determine output destination
     FILE *out = stdout;

@@ -25,4 +25,41 @@ jpeg_reader.o: jpeg_reader.c jpeg_reader.h image.h
 clean:
 	rm -f $(TARGET) $(OBJECTS)
 
-.PHONY: all clean
+# Test target: verify output matches reference files
+# Generic - just add new test input/output files without changing Makefile
+test: $(TARGET)
+	@echo "Running verification tests..."
+	@passed=0; failed=0; \
+	for ref in testoutput-C/*.bmp; do \
+		basename=$$(basename "$$ref" .bmp); \
+		input=""; \
+		for ext in png jpg jpeg; do \
+			if [ -f "testinput/$$basename.$$ext" ]; then \
+				input="testinput/$$basename.$$ext"; \
+				break; \
+			fi; \
+		done; \
+		if [ -z "$$input" ]; then \
+			echo "SKIP: No input file found for $$basename"; \
+			continue; \
+		fi; \
+		tmpout=$$(mktemp --suffix=.bmp); \
+		if ./$(TARGET) -C "$$input" -o "$$tmpout" 2>/dev/null; then \
+			if cmp -s "$$ref" "$$tmpout"; then \
+				echo "PASS: $$basename"; \
+				passed=$$((passed + 1)); \
+			else \
+				echo "FAIL: $$basename (output mismatch)"; \
+				failed=$$((failed + 1)); \
+			fi; \
+		else \
+			echo "FAIL: $$basename (conversion error)"; \
+			failed=$$((failed + 1)); \
+		fi; \
+		rm -f "$$tmpout"; \
+	done; \
+	echo ""; \
+	echo "Results: $$passed passed, $$failed failed"; \
+	if [ $$failed -gt 0 ]; then exit 1; fi
+
+.PHONY: all clean test

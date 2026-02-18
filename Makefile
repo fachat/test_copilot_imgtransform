@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2
-LIBS = -lpng -lm
+LIBS = -lpng -ljpeg -lm
 
 TARGET = imgtransform
 SOURCES = imgtransform.c

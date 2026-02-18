@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <getopt.h>
 #include <png.h>
+#include <jpeglib.h>
 
 #define TARGET_WIDTH 720
 #define TARGET_HEIGHT 576
@@ -176,6 +177,237 @@ Image* read_png(const char *filename) {
     }
     Image *img = read_png_from_fp(fp);
     fclose(fp);
+    return img;
+}
+
+// Read JPEG from file pointer
+Image* read_jpeg_from_fp(FILE *fp) {
+    struct jpeg_decompress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_decompress(&cinfo);
+    jpeg_stdio_src(&cinfo, fp);
+    
+    if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        jpeg_destroy_decompress(&cinfo);
+        return NULL;
+    }
+    
+    // Force RGB output
+    cinfo.out_color_space = JCS_RGB;
+    
+    jpeg_start_decompress(&cinfo);
+    
+    int width = cinfo.output_width;
+    int height = cinfo.output_height;
+    int row_stride = width * cinfo.output_components;
+    
+    // Create image structure
+    Image *img = (Image*)malloc(sizeof(Image));
+    if (!img) {
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        return NULL;
+    }
+    
+    img->width = width;
+    img->height = height;
+    img->data = (uint8_t*)malloc(width * height * 3);
+    if (!img->data) {
+        free(img);
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        return NULL;
+    }
+    
+    // Allocate row buffer using standard allocation
+    JSAMPROW row_buffer = (JSAMPROW)malloc(row_stride);
+    if (!row_buffer) {
+        free(img->data);
+        free(img);
+        jpeg_finish_decompress(&cinfo);
+        jpeg_destroy_decompress(&cinfo);
+        return NULL;
+    }
+    
+    // Read scanlines
+    int y = 0;
+    while (cinfo.output_scanline < cinfo.output_height) {
+        jpeg_read_scanlines(&cinfo, &row_buffer, 1);
+        memcpy(&img->data[y * width * 3], row_buffer, width * 3);
+        y++;
+    }
+    
+    free(row_buffer);
+    jpeg_finish_decompress(&cinfo);
+    jpeg_destroy_decompress(&cinfo);
+    
+    return img;
+}
+
+// Read JPEG file
+Image* read_jpeg(const char *filename) {
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        fprintf(stderr, "Error: Cannot open file %s\n", filename);
+        return NULL;
+    }
+    Image *img = read_jpeg_from_fp(fp);
+    fclose(fp);
+    return img;
+}
+
+// Image format types
+typedef enum {
+    FORMAT_UNKNOWN,
+    FORMAT_PNG,
+    FORMAT_JPEG
+} ImageFormat;
+
+// Detect image format from magic bytes
+ImageFormat detect_image_format(FILE *fp) {
+    unsigned char header[8];
+    
+    // Read the first 8 bytes for format detection
+    size_t bytes_read = fread(header, 1, 8, fp);
+    if (bytes_read < 3 || ferror(fp)) {
+        // Need at least 3 bytes for JPEG signature, 8 for PNG
+        // If there's a read error, don't seek back
+        return FORMAT_UNKNOWN;
+    }
+    
+    // Seek back to the beginning
+    fseek(fp, 0, SEEK_SET);
+    
+    // Check for PNG signature: 0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A
+    if (bytes_read >= 8 &&
+        header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47 &&
+        header[4] == 0x0D && header[5] == 0x0A && header[6] == 0x1A && header[7] == 0x0A) {
+        return FORMAT_PNG;
+    }
+    
+    // Check for JPEG signature: 0xFF 0xD8 0xFF
+    if (header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) {
+        return FORMAT_JPEG;
+    }
+    
+    return FORMAT_UNKNOWN;
+}
+
+// Read image with automatic format detection
+Image* read_image_auto(const char *filename) {
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        fprintf(stderr, "Error: Cannot open file %s\n", filename);
+        return NULL;
+    }
+    
+    ImageFormat format = detect_image_format(fp);
+    Image *img = NULL;
+    
+    switch (format) {
+        case FORMAT_PNG:
+            img = read_png_from_fp(fp);
+            break;
+        case FORMAT_JPEG:
+            img = read_jpeg_from_fp(fp);
+            break;
+        default:
+            fprintf(stderr, "Error: Unknown or unsupported image format\n");
+            break;
+    }
+    
+    fclose(fp);
+    return img;
+}
+
+// Read image from stdin with automatic format detection
+Image* read_image_from_stdin(void) {
+    // Read the header first to detect the format
+    unsigned char header[8];
+    if (fread(header, 1, 8, stdin) != 8) {
+        fprintf(stderr, "Error: Failed to read image header from stdin\n");
+        return NULL;
+    }
+    
+    ImageFormat format = FORMAT_UNKNOWN;
+    
+    // Check for PNG signature
+    if (header[0] == 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47 &&
+        header[4] == 0x0D && header[5] == 0x0A && header[6] == 0x1A && header[7] == 0x0A) {
+        format = FORMAT_PNG;
+    }
+    // Check for JPEG signature
+    else if (header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF) {
+        format = FORMAT_JPEG;
+    }
+    
+    if (format == FORMAT_UNKNOWN) {
+        fprintf(stderr, "Error: Unknown or unsupported image format from stdin\n");
+        return NULL;
+    }
+    
+    // We can't seek stdin, so we need to read the whole input into memory
+    // Start with the header we already read
+    size_t capacity = 10 * 1024 * 1024; // 10MB initial capacity
+    size_t size = 8;
+    unsigned char *buffer = (unsigned char*)malloc(capacity);
+    if (!buffer) {
+        fprintf(stderr, "Error: Memory allocation failed\n");
+        return NULL;
+    }
+    memcpy(buffer, header, 8);
+    
+    // Read the rest from stdin with a read chunk size
+    #define READ_CHUNK_SIZE 65536
+    size_t bytes_read;
+    while (1) {
+        // Ensure we have space for at least one chunk
+        if (capacity - size < READ_CHUNK_SIZE) {
+            size_t new_capacity = capacity + (capacity / 2); // Grow by 50%
+            unsigned char *new_buffer = (unsigned char*)realloc(buffer, new_capacity);
+            if (!new_buffer) {
+                free(buffer);
+                fprintf(stderr, "Error: Memory reallocation failed\n");
+                return NULL;
+            }
+            buffer = new_buffer;
+            capacity = new_capacity;
+        }
+        
+        bytes_read = fread(buffer + size, 1, READ_CHUNK_SIZE, stdin);
+        if (bytes_read == 0) {
+            break; // EOF or error
+        }
+        size += bytes_read;
+    }
+    
+    // Create a temporary file to hold the data (needed for libjpeg/libpng)
+    FILE *tmp = tmpfile();
+    if (!tmp) {
+        free(buffer);
+        fprintf(stderr, "Error: Cannot create temporary file\n");
+        return NULL;
+    }
+    
+    fwrite(buffer, 1, size, tmp);
+    free(buffer);
+    fseek(tmp, 0, SEEK_SET);
+    
+    Image *img = NULL;
+    switch (format) {
+        case FORMAT_PNG:
+            img = read_png_from_fp(tmp);
+            break;
+        case FORMAT_JPEG:
+            img = read_jpeg_from_fp(tmp);
+            break;
+        default:
+            break;
+    }
+    
+    fclose(tmp);
     return img;
 }
 
@@ -573,10 +805,12 @@ void free_image(Image *img) {
 }
 
 void print_usage(const char *program_name) {
-    fprintf(stderr, "Usage: %s [OPTIONS] [input.png]\n\n", program_name);
-    fprintf(stderr, "Image transformation utility that converts PNG images to BMP format.\n");
-    fprintf(stderr, "Reads a PNG image, resizes it to 720x576 resolution, reduces the color\n");
-    fprintf(stderr, "palette to 16 colors (VGA palette), and outputs the result as a BMP file.\n\n");
+    fprintf(stderr, "Usage: %s [OPTIONS] [input_image]\n\n", program_name);
+    fprintf(stderr, "Image transformation utility that converts PNG or JPEG images to BMP format.\n");
+    fprintf(stderr, "Reads an image file (PNG or JPEG/JPG), resizes it to 720x576 resolution,\n");
+    fprintf(stderr, "reduces the color palette to 16 colors (VGA palette), and outputs the result\n");
+    fprintf(stderr, "as a BMP file. The input image format is automatically detected from the\n");
+    fprintf(stderr, "file content (magic bytes), not from the file extension.\n\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -h           Show this help message and exit\n");
     fprintf(stderr, "  -o <file>    Save output to <file> instead of stdout\n");
@@ -585,7 +819,10 @@ void print_usage(const char *program_name) {
     fprintf(stderr, "               If the source is too tall, crop top and bottom equally.\n");
     fprintf(stderr, "  -C           Optimize the colour palette so that output colours best\n");
     fprintf(stderr, "               match the input colours, instead of using the VGA palette.\n\n");
-    fprintf(stderr, "If no input file is specified, PNG data is read from stdin.\n");
+    fprintf(stderr, "Supported input formats:\n");
+    fprintf(stderr, "  - PNG (Portable Network Graphics)\n");
+    fprintf(stderr, "  - JPEG/JPG (Joint Photographic Experts Group)\n\n");
+    fprintf(stderr, "If no input file is specified, image data is read from stdin.\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -620,16 +857,16 @@ int main(int argc, char *argv[]) {
         input_file = argv[optind];
     }
     
-    // Read PNG
+    // Read image (auto-detects format)
     Image *img;
     if (input_file) {
-        img = read_png(input_file);
+        img = read_image_auto(input_file);
     } else {
-        img = read_png_from_fp(stdin);
+        img = read_image_from_stdin();
     }
     
     if (!img) {
-        fprintf(stderr, "Error: Failed to read PNG file\n");
+        fprintf(stderr, "Error: Failed to read image file\n");
         return 1;
     }
     
